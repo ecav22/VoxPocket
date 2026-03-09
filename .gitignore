@@ -1,0 +1,28 @@
+# macOS / editor
+.DS_Store
+._*
+__pycache__/
+*.pyc
+
+# Python envs
+.venv/
+venv/
+env/
+
+# Data (large)
+refined-set/
+PDBbind_v2020_refined.tar/
+PDBbind_v2020_refined.tar.gz
+10gs/
+2ovv/
+*.pdb
+*.pqr
+*.mol2
+*.sdf
+*.npy
+
+# Artifacts
+artifacts/
+
+# Legacy
+legacy/
