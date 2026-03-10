@@ -29,6 +29,12 @@ def main():
         default=str(PROJECT_ROOT / "artifacts/torch/experiment_results.csv"),
         help="CSV path for experiment logging",
     )
+    parser.add_argument(
+        "--detection-csv",
+        type=str,
+        default=str(PROJECT_ROOT / "artifacts/torch/detection_results.csv"),
+        help="CSV path for per-sample detection/distance logging",
+    )
     args = parser.parse_args()
 
     if torch.cuda.is_available():
@@ -69,9 +75,12 @@ def main():
     total_loss = 0.0
     total_metric = 0.0
     total_counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+    detected_count = 0
+    not_detected_count = 0
+    distances = []
 
     with torch.no_grad():
-        for features, target in loader:
+        for idx, (features, target) in enumerate(loader):
             features = features.to(device)
             target = target.to(device)
 
@@ -88,9 +97,33 @@ def main():
             total_counts["fn"] += counts["fn"]
             total_counts["tn"] += counts["tn"]
 
+            sample_path = dataset.filepaths[idx]
+            pred_np = pred.detach().cpu().numpy()
+            detected, distance = utilities.pocket_detected_and_distance(sample_path, pred_np, threshold=args.threshold)
+            if detected:
+                detected_count += 1
+                distances.append(distance)
+            else:
+                not_detected_count += 1
+
+            utilities.append_detection_row(
+                args.detection_csv,
+                {
+                    "run_name": args.run_name,
+                    "sample_path": sample_path,
+                    "pdb_id": sample_path.rstrip("/").split("/")[-1],
+                    "threshold": args.threshold,
+                    "detected": int(detected),
+                    "distance_to_reference": "" if distance is None else distance,
+                },
+            )
+
     mean_loss = total_loss / len(loader)
     mean_metric = total_metric / len(loader)
     segm = utilities.segmentation_metrics_from_counts(total_counts)
+    detection_rate = detected_count / len(loader)
+    mean_distance = float(sum(distances) / len(distances)) if len(distances) > 0 else None
+    median_distance = float(torch.tensor(distances).median().item()) if len(distances) > 0 else None
 
     print("Samples evaluated:", len(loader))
     print("Features:", feature_names)
@@ -103,6 +136,12 @@ def main():
     print(f"Precision: {segm['precision']:.6f}")
     print(f"Recall: {segm['recall']:.6f}")
     print(f"F1: {segm['f1']:.6f}")
+    print(f"Pocket detected: {detected_count}/{len(loader)} ({detection_rate:.6f})")
+    if mean_distance is not None:
+        print(f"Mean distance to reference pocket: {mean_distance:.6f}")
+        print(f"Median distance to reference pocket: {median_distance:.6f}")
+    else:
+        print("Mean distance to reference pocket: N/A (no detections)")
 
     utilities.append_experiment_row(
         args.results_csv,
@@ -130,12 +169,18 @@ def main():
             "precision": segm["precision"],
             "recall": segm["recall"],
             "f1": segm["f1"],
+            "detected_count": detected_count,
+            "not_detected_count": not_detected_count,
+            "detection_rate": detection_rate,
+            "mean_distance_to_reference": "" if mean_distance is None else mean_distance,
+            "median_distance_to_reference": "" if median_distance is None else median_distance,
             "checkpoint_path": str(PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention.pt"),
             "history_path": str(PROJECT_ROOT / "artifacts/torch/history_unet_bn_attention.pkl"),
             "notes": "eval_complete",
         },
     )
     print(f"Appended eval results to {args.results_csv}")
+    print(f"Appended per-sample detections to {args.detection_csv}")
 
 
 if __name__ == "__main__":

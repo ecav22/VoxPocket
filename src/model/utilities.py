@@ -83,9 +83,42 @@ def append_experiment_row(csv_path, row):
         "precision",
         "recall",
         "f1",
+        "detected_count",
+        "not_detected_count",
+        "detection_rate",
+        "mean_distance_to_reference",
+        "median_distance_to_reference",
         "checkpoint_path",
         "history_path",
         "notes",
+    ]
+
+    write_header = not csv_path.exists()
+    with csv_path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(base_row)
+
+
+def append_detection_row(csv_path, row):
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    base_row = {
+        "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds"),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+    }
+    base_row.update(row)
+
+    fieldnames = [
+        "timestamp_utc",
+        "slurm_job_id",
+        "run_name",
+        "sample_path",
+        "pdb_id",
+        "threshold",
+        "detected",
+        "distance_to_reference",
     ]
 
     write_header = not csv_path.exists()
@@ -301,6 +334,27 @@ def segmentation_metrics_from_counts(counts):
         "recall": recall,
         "f1": f1,
     }
+
+
+def pocket_detected_and_distance(sample_path, predicted_tensor, threshold=0.5):
+    """
+    Determine if a pocket is detected and compute centroid distance to reference pocket.
+    Returns (detected: bool, distance: float|None).
+    """
+    pdb = Path(sample_path.rstrip("/")).name
+    xyz_protein, predicted_values, xyz_pocket_target = obtain_coordinates(pdb, predicted_tensor)
+    predicted_values = numpy.asarray(predicted_values)
+
+    detected_mask = predicted_values >= threshold
+    detected = bool(numpy.any(detected_mask))
+    if not detected:
+        return False, None
+
+    pred_coords = xyz_protein[detected_mask]
+    pred_centroid = numpy.mean(pred_coords, axis=0)
+    target_centroid = numpy.mean(xyz_pocket_target, axis=0)
+    distance = float(numpy.linalg.norm(pred_centroid - target_centroid))
+    return True, distance
 
 
 class UNetAttention3D(nn.Module):
