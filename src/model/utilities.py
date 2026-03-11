@@ -93,7 +93,25 @@ def append_experiment_row(csv_path, row):
         "notes",
     ]
 
-    write_header = not csv_path.exists()
+    def ensure_experiment_csv_schema(path, expected_fields):
+        if not path.exists():
+            return
+        with path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            current_fields = reader.fieldnames or []
+            existing_rows = list(reader)
+        if current_fields == expected_fields:
+            return
+        # Rewrite the file with the expected schema, preserving overlapping columns.
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=expected_fields, extrasaction="ignore")
+            writer.writeheader()
+            for old_row in existing_rows:
+                new_row = {k: old_row.get(k, "") for k in expected_fields}
+                writer.writerow(new_row)
+
+    ensure_experiment_csv_schema(csv_path, fieldnames)
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
     with csv_path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if write_header:

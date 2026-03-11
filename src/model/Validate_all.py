@@ -17,6 +17,12 @@ def main():
         help="Comma-separated feature names. If omitted, uses checkpoint feature_names.",
     )
     parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=str(PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention.pt"),
+        help="Path to model checkpoint (.pt)",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=0.5,
@@ -43,7 +49,8 @@ def main():
         device = torch.device("cpu")
     if torch.backends.mps.is_available() and not torch.cuda.is_available():
         print("MPS detected but disabled: ConvTranspose3d is unsupported on MPS for this model.")
-    checkpoint = torch.load(PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention.pt", map_location=device)
+    checkpoint_path = Path(args.checkpoint)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_features = checkpoint.get("feature_names", utilities.FEATURE_ORDER)
 
     if args.features is None:
@@ -174,7 +181,7 @@ def main():
             "detection_rate": detection_rate,
             "mean_distance_to_reference": "" if mean_distance is None else mean_distance,
             "median_distance_to_reference": "" if median_distance is None else median_distance,
-            "checkpoint_path": str(PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention.pt"),
+            "checkpoint_path": str(checkpoint_path),
             "history_path": str(PROJECT_ROOT / "artifacts/torch/history_unet_bn_attention.pkl"),
             "notes": "eval_complete",
         },
