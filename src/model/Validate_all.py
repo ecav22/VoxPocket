@@ -11,6 +11,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--filepaths",
+        type=str,
+        default=str(PROJECT_ROOT / "config/checkpoints/checkpoint_tensor_cnn.txt"),
+        help="Path to evaluation filepaths list",
+    )
+    parser.add_argument(
         "--features",
         type=str,
         default=None,
@@ -25,8 +31,8 @@ def main():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Probability threshold for segmentation metrics (accuracy, Dice, IoU, etc.)",
+        default=None,
+        help="Probability threshold for segmentation metrics (accuracy, Dice, IoU, etc.). Defaults to checkpoint best_val_threshold if present, else 0.5.",
     )
     parser.add_argument("--run-name", type=str, default="default", help="Label for CSV tracking")
     parser.add_argument(
@@ -52,6 +58,7 @@ def main():
     checkpoint_path = Path(args.checkpoint)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_features = checkpoint.get("feature_names", utilities.FEATURE_ORDER)
+    threshold = args.threshold if args.threshold is not None else checkpoint.get("best_val_threshold", 0.5)
 
     if args.features is None:
         feature_names = checkpoint_features
@@ -70,10 +77,11 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    with open(PROJECT_ROOT / "config/filepaths.txt", "r") as f:
+    eval_file = Path(args.filepaths)
+    with open(eval_file, "r") as f:
         files = [line.strip() for line in f.readlines() if line.strip()]
     if len(files) == 0:
-        raise ValueError("filepaths.txt is empty. Run prepare_filenames.py first.")
+        raise ValueError(f"Evaluation file list is empty: {eval_file}")
 
     dataset = utilities.PocketDataset(files, feature_names=feature_names)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
@@ -95,7 +103,7 @@ def main():
             pred = torch.sigmoid(logits)
             loss = criterion(logits, target)
             metric = utilities.custom_metrics(target, pred)
-            counts = utilities.segmentation_counts(target, pred, threshold=args.threshold)
+            counts = utilities.segmentation_counts(target, pred, threshold=threshold)
 
             total_loss += loss.item()
             total_metric += metric.item()
@@ -106,7 +114,7 @@ def main():
 
             sample_path = dataset.filepaths[idx]
             pred_np = pred.detach().cpu().numpy()
-            detected, distance = utilities.pocket_detected_and_distance(sample_path, pred_np, threshold=args.threshold)
+            detected, distance = utilities.pocket_detected_and_distance(sample_path, pred_np, threshold=threshold)
             if detected:
                 detected_count += 1
                 distances.append(distance)
@@ -119,7 +127,7 @@ def main():
                     "run_name": args.run_name,
                     "sample_path": sample_path,
                     "pdb_id": sample_path.rstrip("/").split("/")[-1],
-                    "threshold": args.threshold,
+                    "threshold": threshold,
                     "detected": int(detected),
                     "distance_to_reference": "" if distance is None else distance,
                 },
@@ -133,8 +141,9 @@ def main():
     median_distance = float(torch.tensor(distances).median().item()) if len(distances) > 0 else None
 
     print("Samples evaluated:", len(loader))
+    print("Evaluation file list:", eval_file)
     print("Features:", feature_names)
-    print(f"Threshold: {args.threshold}")
+    print(f"Threshold: {threshold}")
     print(f"Mean BCE loss: {mean_loss:.6f}")
     print(f"Mean custom_metrics: {mean_metric:.6f}")
     print(f"Voxel accuracy: {segm['voxel_accuracy']:.6f}")
@@ -169,7 +178,7 @@ def main():
             "corrupt_samples": dataset.corrupt_count,
             "mean_loss": mean_loss,
             "mean_custom_metrics": mean_metric,
-            "threshold": args.threshold,
+            "threshold": threshold,
             "voxel_accuracy": segm["voxel_accuracy"],
             "dice": segm["dice"],
             "iou": segm["iou"],

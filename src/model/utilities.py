@@ -247,7 +247,7 @@ def open_files(path, feature_names=None):
 
 
 class PocketDataset(Dataset):
-    def __init__(self, filepaths, feature_names=None):
+    def __init__(self, filepaths, feature_names=None, augment=False):
         required = [
             "for_labview_protein_/N_tensor.npy",
             "for_labview_protein_/bfactors_tensor.npy",
@@ -289,6 +289,7 @@ class PocketDataset(Dataset):
         self.usable_count = len(valid_paths)
         self.skipped_count = skipped
         self.corrupt_count = bad_data
+        self.augment = augment
         if len(self.filepaths) == 0:
             raise ValueError("No usable dataset entries found. Run tensor generation scripts first.")
 
@@ -299,7 +300,28 @@ class PocketDataset(Dataset):
         features, target = open_files(self.filepaths[idx], feature_names=self.feature_names)
         x = torch.from_numpy(features).permute(3, 0, 1, 2)  # [C, D, H, W]
         y = torch.from_numpy(target).permute(3, 0, 1, 2)    # [1, D, H, W]
+        if self.augment:
+            x, y = random_3d_augmentation(x, y)
         return x, y
+
+
+def random_3d_augmentation(x, y):
+    # Apply shared 90-degree rotations and flips so geometry stays aligned.
+    spatial_dims = [1, 2, 3]
+
+    for dim in spatial_dims:
+        if torch.rand(1).item() < 0.5:
+            x = torch.flip(x, dims=[dim])
+            y = torch.flip(y, dims=[dim])
+
+    rot_planes = [(1, 2), (1, 3), (2, 3)]
+    plane = rot_planes[torch.randint(0, len(rot_planes), (1,)).item()]
+    k = torch.randint(0, 4, (1,)).item()
+    if k > 0:
+        x = torch.rot90(x, k=k, dims=plane)
+        y = torch.rot90(y, k=k, dims=plane)
+
+    return x.contiguous(), y.contiguous()
 
 
 def custom_metrics(y_true, y_pred):

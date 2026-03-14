@@ -42,14 +42,20 @@ def make_loss_fn(loss_name, pos_weight, dice_weight, device):
     return loss_fn
 
 
+def parse_thresholds(threshold_arg):
+    return [float(x.strip()) for x in threshold_arg.split(",") if x.strip()]
+
+
 def evaluate_loader(model, loader, loss_fn, device, threshold=0.5):
     model.eval()
     total_loss = 0.0
     total_metric = 0.0
     total_counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+    detected_count = 0
+    distances = []
 
     with torch.no_grad():
-        for features, target in loader:
+        for idx, (features, target) in enumerate(loader):
             features = features.to(device)
             target = target.to(device)
             logits = model(features)
@@ -63,15 +69,56 @@ def evaluate_loader(model, loader, loss_fn, device, threshold=0.5):
             total_counts["fn"] += counts["fn"]
             total_counts["tn"] += counts["tn"]
 
+            sample_path = loader.dataset.filepaths[idx]
+            pred_np = pred.detach().cpu().numpy()
+            detected, distance = utilities.pocket_detected_and_distance(sample_path, pred_np, threshold=threshold)
+            if detected:
+                detected_count += 1
+                distances.append(distance)
+
     n = len(loader)
     mean_loss = total_loss / n
     mean_metric = total_metric / n
-    dice = utilities.segmentation_metrics_from_counts(total_counts)["dice"]
-    return mean_loss, mean_metric, dice
+    segm = utilities.segmentation_metrics_from_counts(total_counts)
+    detection_rate = detected_count / n
+    mean_distance = float(sum(distances) / len(distances)) if len(distances) > 0 else None
+    return {
+        "mean_loss": mean_loss,
+        "mean_metric": mean_metric,
+        "dice": segm["dice"],
+        "iou": segm["iou"],
+        "precision": segm["precision"],
+        "recall": segm["recall"],
+        "f1": segm["f1"],
+        "voxel_accuracy": segm["voxel_accuracy"],
+        "detection_rate": detection_rate,
+        "mean_distance": mean_distance,
+    }
+
+
+def choose_best_validation_metrics(model, loader, loss_fn, device, thresholds):
+    best = None
+    for threshold in thresholds:
+        metrics = evaluate_loader(model, loader, loss_fn, device, threshold=threshold)
+        metrics["threshold"] = threshold
+        score = (
+            metrics["dice"],
+            metrics["detection_rate"],
+            -1e9 if metrics["mean_distance"] is None else -metrics["mean_distance"],
+        )
+        if best is None or score > best["score"]:
+            best = {"score": score, "metrics": metrics}
+    return best["metrics"]
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--filepaths",
+        type=str,
+        default=str(PROJECT_ROOT / "config/filepaths.txt"),
+        help="Path to training filepaths list",
+    )
     parser.add_argument(
         "--features",
         type=str,
@@ -96,6 +143,14 @@ def main():
     parser.add_argument("--save-best", type=str, default="true", help="Save best-by-val-dice checkpoint true/false")
     parser.add_argument("--max-samples", type=int, default=24, help="Max samples when toy=true")
     parser.add_argument("--max-steps", type=int, default=12, help="Max steps per epoch when toy=true")
+    parser.add_argument("--augment", type=str, default="true", help="Apply simple 3D augmentation during training")
+    parser.add_argument("--early-stop-patience", type=int, default=5, help="Stop after N epochs without validation improvement")
+    parser.add_argument(
+        "--val-thresholds",
+        type=str,
+        default="0.3,0.4,0.5,0.6,0.7",
+        help="Comma-separated thresholds to sweep on validation",
+    )
     parser.add_argument("--run-name", type=str, default="default", help="Label for CSV tracking")
     parser.add_argument(
         "--results-csv",
@@ -108,14 +163,19 @@ def main():
 
     toy_mode = utilities.parse_bool(args.toy)
     save_best = utilities.parse_bool(args.save_best)
+    augment = utilities.parse_bool(args.augment)
     toy_max_samples = args.max_samples
     toy_max_steps_per_epoch = args.max_steps
+    val_thresholds = parse_thresholds(args.val_thresholds)
+    if len(val_thresholds) == 0:
+        raise ValueError("At least one validation threshold must be provided.")
 
-    with open(PROJECT_ROOT / "config/filepaths.txt", "r") as f:
+    train_file = Path(args.filepaths)
+    with open(train_file, "r") as f:
         files = [line.strip() for line in f.readlines() if line.strip()]
 
     if len(files) == 0:
-        raise ValueError("filepaths.txt is empty. Run prepare_filenames.py first.")
+        raise ValueError(f"Training file list is empty: {train_file}")
 
     batch_size = args.batch_size
     num_epochs = args.toy_epochs if toy_mode else args.epochs
@@ -135,12 +195,15 @@ def main():
     if torch.backends.mps.is_available() and not torch.cuda.is_available():
         print("MPS detected but disabled: ConvTranspose3d is unsupported on MPS for this model.")
     print("Training samples:", len(files))
+    print("Training file list:", train_file)
     print("Toy mode:", toy_mode)
     print("Features:", feature_names)
     print("Run name:", args.run_name)
     print("Loss:", args.loss, "pos_weight:", args.pos_weight, "dice_weight:", args.dice_weight)
+    print("Augment:", augment)
+    print("Validation thresholds:", val_thresholds)
 
-    dataset = utilities.PocketDataset(files, feature_names=feature_names)
+    dataset = utilities.PocketDataset(files, feature_names=feature_names, augment=augment and not toy_mode)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
     val_loader = None
@@ -150,7 +213,7 @@ def main():
         with open(val_file, "r") as f:
             val_files = [line.strip() for line in f.readlines() if line.strip()]
         if len(val_files) > 0:
-            val_dataset = utilities.PocketDataset(val_files, feature_names=feature_names)
+            val_dataset = utilities.PocketDataset(val_files, feature_names=feature_names, augment=False)
             val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
             print("Validation samples:", len(val_dataset))
         else:
@@ -167,9 +230,21 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_fn = make_loss_fn(args.loss, args.pos_weight, args.dice_weight, device)
 
-    history = {"loss": [], "custom_metrics": [], "val_loss": [], "val_custom_metrics": [], "val_dice": []}
+    history = {
+        "loss": [],
+        "custom_metrics": [],
+        "val_loss": [],
+        "val_custom_metrics": [],
+        "val_dice": [],
+        "val_detection_rate": [],
+        "val_mean_distance": [],
+        "val_threshold": [],
+    }
     best_val_dice = -1.0
+    best_val_detection_rate = -1.0
+    best_val_mean_distance = None
     best_checkpoint_path = PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention_best.pt"
+    epochs_without_improvement = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -202,14 +277,45 @@ def main():
 
         msg = f"Epoch {epoch + 1}/{num_epochs} - steps: {steps_per_epoch} - loss: {epoch_loss:.6f} - custom_metrics: {epoch_metric:.6f}"
         if val_loader is not None:
-            val_loss, val_metric, val_dice = evaluate_loader(model, val_loader, loss_fn, device, threshold=0.5)
+            val_metrics = choose_best_validation_metrics(model, val_loader, loss_fn, device, val_thresholds)
+            val_loss = val_metrics["mean_loss"]
+            val_metric = val_metrics["mean_metric"]
+            val_dice = val_metrics["dice"]
+            val_detection_rate = val_metrics["detection_rate"]
+            val_mean_distance = val_metrics["mean_distance"]
+            val_threshold = val_metrics["threshold"]
             history["val_loss"].append(val_loss)
             history["val_custom_metrics"].append(val_metric)
             history["val_dice"].append(val_dice)
-            msg += f" - val_loss: {val_loss:.6f} - val_custom_metrics: {val_metric:.6f} - val_dice: {val_dice:.6f}"
+            history["val_detection_rate"].append(val_detection_rate)
+            history["val_mean_distance"].append("" if val_mean_distance is None else val_mean_distance)
+            history["val_threshold"].append(val_threshold)
+            msg += (
+                f" - val_threshold: {val_threshold:.2f}"
+                f" - val_loss: {val_loss:.6f}"
+                f" - val_custom_metrics: {val_metric:.6f}"
+                f" - val_dice: {val_dice:.6f}"
+                f" - val_detect: {val_detection_rate:.6f}"
+            )
+            if val_mean_distance is not None:
+                msg += f" - val_dist: {val_mean_distance:.6f}"
 
-            if save_best and val_dice > best_val_dice:
+            improved = (
+                val_dice > best_val_dice
+                or (val_dice == best_val_dice and val_detection_rate > best_val_detection_rate)
+                or (
+                    val_dice == best_val_dice
+                    and val_detection_rate == best_val_detection_rate
+                    and val_mean_distance is not None
+                    and (best_val_mean_distance is None or val_mean_distance < best_val_mean_distance)
+                )
+            )
+
+            if save_best and improved:
                 best_val_dice = val_dice
+                best_val_detection_rate = val_detection_rate
+                best_val_mean_distance = val_mean_distance
+                epochs_without_improvement = 0
                 best_checkpoint = {
                     "model_state_dict": model.state_dict(),
                     "in_channels": len(feature_names),
@@ -217,13 +323,24 @@ def main():
                     "dropout_rate": dropout_rate,
                     "history": history,
                     "best_val_dice": best_val_dice,
+                    "best_val_detection_rate": best_val_detection_rate,
+                    "best_val_mean_distance": best_val_mean_distance,
+                    "best_val_threshold": val_threshold,
                     "best_epoch": epoch + 1,
                     "loss_name": args.loss,
                     "pos_weight": args.pos_weight,
                     "dice_weight": args.dice_weight,
                 }
                 torch.save(best_checkpoint, best_checkpoint_path)
+            else:
+                epochs_without_improvement += 1
         print(msg)
+        if val_loader is not None and args.early_stop_patience > 0 and epochs_without_improvement >= args.early_stop_patience:
+            print(
+                f"Early stopping triggered after {epoch + 1} epochs "
+                f"(patience={args.early_stop_patience})."
+            )
+            break
 
     checkpoint = {
         "model_state_dict": model.state_dict(),
@@ -234,6 +351,7 @@ def main():
         "loss_name": args.loss,
         "pos_weight": args.pos_weight,
         "dice_weight": args.dice_weight,
+        "val_thresholds": val_thresholds,
     }
     checkpoint_path = PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention.pt"
     history_path = PROJECT_ROOT / "artifacts/torch/history_unet_bn_attention.pkl"
@@ -266,7 +384,11 @@ def main():
             "mean_custom_metrics": final_metric,
             "checkpoint_path": str(checkpoint_path),
             "history_path": str(history_path),
-            "notes": f"train_complete;loss={args.loss};pos_weight={args.pos_weight};dice_weight={args.dice_weight};final_val_dice={final_val_dice};best_val_dice={best_val_dice}",
+            "notes": (
+                f"train_complete;loss={args.loss};pos_weight={args.pos_weight};dice_weight={args.dice_weight};"
+                f"augment={augment};final_val_dice={final_val_dice};best_val_dice={best_val_dice};"
+                f"best_val_detection_rate={best_val_detection_rate};best_val_mean_distance={best_val_mean_distance}"
+            ),
         },
     )
 
