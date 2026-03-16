@@ -89,7 +89,7 @@ Current implementation status:
 - Dedicated evaluation scripts now report top-1 and top-k candidate recovery from existing VoxPocket checkpoints.
 - Multi-threshold candidate union with centroid-based deduplication has been implemented.
 - Binary and pairwise learned ranking baselines were tested, but neither clearly outperformed heuristic ranking across the main top-k metrics.
-- Current conclusion: the candidate framework is useful, but ranking is not yet a headline improvement over the heuristic baseline.
+- Current conclusion: the candidate framework is useful, but ranking is not yet a headline improvement over the heuristic baseline and is best treated as exploratory/future work.
 
 ### Phase 4: Hybrid VoxPocket + P2Rank
 

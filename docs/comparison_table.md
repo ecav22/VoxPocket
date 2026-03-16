@@ -11,7 +11,7 @@ Held-out test set size: 160 proteins
 | VoxPocket multitask (segmentation + presence + centroid) | 0.3 | 0.4174 | 0.2638 | 0.5254 | 0.3462 | 0.7750 | 1.0282 | 0.3328 | Centroid head improved neither overlap nor detection |
 | VoxPocket heuristic candidates | `t=0.15`, `min=1` | N/A | N/A | N/A | N/A | 0.8250 candidate presence | 1.1304 | 0.4379 | Best single-threshold candidate pool; top-3 success @ 1.0 nm = 0.6063 |
 | VoxPocket multi-threshold candidates | `[0.10,0.15,0.20,0.25,0.30]`, `min=1` | N/A | N/A | N/A | N/A | 0.8250 candidate presence | 1.1237 | 0.4379 | More candidate diversity; top-3 success @ 0.5 nm improved to 0.5313 |
-| VoxPocket pairwise ranker on multi-threshold pool | same as above | N/A | N/A | N/A | N/A | N/A | 1.1218 | 0.4183 | Small top-1 tightening, but no clear top-k gain over heuristic ordering |
+| VoxPocket pairwise ranker on multi-threshold pool | same as above | N/A | N/A | N/A | N/A | N/A | 1.1723 | 0.4451 | Did not outperform multi-threshold heuristic ordering on the main top-k metrics |
 | P2Rank top-1 | N/A | N/A | N/A | N/A | N/A | 1.0000 | 0.8067 | 0.3120 | Surface-based ranked pocket localization |
 | P2Rank top-3 best pocket | N/A | N/A | N/A | N/A | N/A | 1.0000 | 0.4132 | 0.2671 | Best of top-3 pocket centers |
 
@@ -21,5 +21,5 @@ Held-out test set size: 160 proteins
 - P2Rank remains stronger for pure sample-level pocket localization.
 - Adding a centroid heatmap head did not improve performance and reduced detection substantially.
 - Candidate extraction and top-k evaluation are now working end-to-end on top of VoxPocket segmentations.
-- Multi-threshold candidate union modestly improved tight top-k localization, but learned ranking did not clearly outperform heuristic ordering.
+- Multi-threshold candidate union modestly improved tight top-k localization, but learned ranking did not outperform heuristic ordering and is currently best treated as exploratory.
 - The current strongest thesis result is still the multitask presence-head segmentation model; the candidate framework is best presented as a secondary methodological extension and future-work foundation.
