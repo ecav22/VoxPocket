@@ -95,11 +95,11 @@ def main():
     distances = []
 
     with torch.no_grad():
-        for idx, (features, target) in enumerate(loader):
+        for idx, (features, target, pocket_present, centroid_target) in enumerate(loader):
             features = features.to(device)
             target = target.to(device)
 
-            logits = model(features)
+            logits, presence_logits, centroid_logits = model(features)
             pred = torch.sigmoid(logits)
             loss = criterion(logits, target)
             metric = utilities.custom_metrics(target, pred)

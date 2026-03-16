@@ -147,6 +147,43 @@ def append_detection_row(csv_path, row):
         writer.writerow(base_row)
 
 
+def append_candidate_row(csv_path, row):
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    base_row = {
+        "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds"),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+    }
+    base_row.update(row)
+
+    fieldnames = [
+        "timestamp_utc",
+        "slurm_job_id",
+        "run_name",
+        "sample_path",
+        "pdb_id",
+        "threshold",
+        "candidate_rank",
+        "candidate_score",
+        "candidate_size",
+        "candidate_mean_prob",
+        "candidate_max_prob",
+        "candidate_centroid_x",
+        "candidate_centroid_y",
+        "candidate_centroid_z",
+        "distance_to_reference",
+        "is_top1",
+        "is_top3",
+    ]
+
+    write_header = not csv_path.exists()
+    with csv_path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(base_row)
+
+
 def mean_max_scaler(non_zero_indices, tensor):
     max_ = numpy.max(tensor[non_zero_indices])
     min_ = numpy.min(tensor[non_zero_indices])
@@ -302,7 +339,9 @@ class PocketDataset(Dataset):
         y = torch.from_numpy(target).permute(3, 0, 1, 2)    # [1, D, H, W]
         if self.augment:
             x, y = random_3d_augmentation(x, y)
-        return x, y
+        pocket_present = torch.tensor([1.0 if (y > 0.5).any() else 0.0], dtype=torch.float32)
+        centroid_heatmap = make_centroid_heatmap(y)
+        return x, y, pocket_present, centroid_heatmap
 
 
 def random_3d_augmentation(x, y):
@@ -322,6 +361,25 @@ def random_3d_augmentation(x, y):
         y = torch.rot90(y, k=k, dims=plane)
 
     return x.contiguous(), y.contiguous()
+
+
+def make_centroid_heatmap(y, sigma=2.0):
+    positive = (y[0] > 0.5).nonzero(as_tuple=False)
+    heatmap = torch.zeros_like(y)
+    if positive.numel() == 0:
+        return heatmap
+
+    center = positive.float().mean(dim=0)
+    depth, height, width = y.shape[1:]
+    zz, yy, xx = torch.meshgrid(
+        torch.arange(depth, dtype=torch.float32),
+        torch.arange(height, dtype=torch.float32),
+        torch.arange(width, dtype=torch.float32),
+        indexing="ij",
+    )
+    dist2 = (zz - center[0]) ** 2 + (yy - center[1]) ** 2 + (xx - center[2]) ** 2
+    heatmap[0] = torch.exp(-dist2 / (2.0 * sigma * sigma))
+    return heatmap
 
 
 def custom_metrics(y_true, y_pred):
@@ -397,6 +455,166 @@ def pocket_detected_and_distance(sample_path, predicted_tensor, threshold=0.5):
     return True, distance
 
 
+def voxel_centers_from_bins(boundaries):
+    x_bins = boundaries[0]
+    y_bins = boundaries[1]
+    z_bins = boundaries[2]
+    x_centers = (x_bins[:-1] + x_bins[1:]) / 2.0
+    y_centers = (y_bins[:-1] + y_bins[1:]) / 2.0
+    z_centers = (z_bins[:-1] + z_bins[1:]) / 2.0
+    return x_centers, y_centers, z_centers
+
+
+def component_centroid_to_xyz(component_indices, boundaries):
+    x_centers, y_centers, z_centers = voxel_centers_from_bins(boundaries)
+    centroid_idx = component_indices.mean(axis=0)
+    ax = int(numpy.clip(round(float(centroid_idx[0])), 0, len(x_centers) - 1))
+    ay = int(numpy.clip(round(float(centroid_idx[1])), 0, len(y_centers) - 1))
+    az = int(numpy.clip(round(float(centroid_idx[2])), 0, len(z_centers) - 1))
+    return numpy.array([x_centers[ax], y_centers[ay], z_centers[az]], dtype=numpy.float32)
+
+
+def connected_components_3d(binary_mask):
+    coords = numpy.argwhere(binary_mask)
+    if coords.size == 0:
+        return []
+
+    active = {tuple(coord.tolist()) for coord in coords}
+    neighbors = [
+        (-1, 0, 0), (1, 0, 0),
+        (0, -1, 0), (0, 1, 0),
+        (0, 0, -1), (0, 0, 1),
+    ]
+    components = []
+
+    while active:
+        start = active.pop()
+        stack = [start]
+        component = [start]
+        while stack:
+            x, y, z = stack.pop()
+            for dx, dy, dz in neighbors:
+                nxt = (x + dx, y + dy, z + dz)
+                if nxt in active:
+                    active.remove(nxt)
+                    stack.append(nxt)
+                    component.append(nxt)
+        components.append(numpy.asarray(component, dtype=numpy.int32))
+
+    return components
+
+
+def extract_ranked_candidates(sample_path, predicted_tensor, threshold=0.5, min_size=3):
+    pdb = Path(sample_path.rstrip("/")).name
+    pred = numpy.asarray(predicted_tensor)
+    if pred.ndim == 5:
+        pred = pred[0, 0]
+    elif pred.ndim == 4:
+        pred = pred[0]
+
+    boundaries = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_protein_/axis_bins.txt")
+    binary_mask = pred >= threshold
+    components = connected_components_3d(binary_mask)
+
+    candidates = []
+    for comp in components:
+        if comp.shape[0] < min_size:
+            continue
+        scores = pred[comp[:, 0], comp[:, 1], comp[:, 2]]
+        mean_prob = float(scores.mean())
+        max_prob = float(scores.max())
+        top_scores = numpy.sort(scores)[-min(5, scores.shape[0]):]
+        top5_mean_prob = float(top_scores.mean())
+        centroid_idx = comp.mean(axis=0)
+        centroid_idx_round = numpy.rint(centroid_idx).astype(numpy.int32)
+        centroid_idx_round[0] = int(numpy.clip(centroid_idx_round[0], 0, pred.shape[0] - 1))
+        centroid_idx_round[1] = int(numpy.clip(centroid_idx_round[1], 0, pred.shape[1] - 1))
+        centroid_idx_round[2] = int(numpy.clip(centroid_idx_round[2], 0, pred.shape[2] - 1))
+        centroid_prob = float(pred[centroid_idx_round[0], centroid_idx_round[1], centroid_idx_round[2]])
+
+        mins = comp.min(axis=0)
+        maxs = comp.max(axis=0)
+        extents = (maxs - mins + 1).astype(numpy.float32)
+        bbox_volume = float(extents[0] * extents[1] * extents[2])
+        fill_ratio = float(comp.shape[0] / max(bbox_volume, 1.0))
+
+        x0 = max(int(centroid_idx_round[0]) - 1, 0)
+        x1 = min(int(centroid_idx_round[0]) + 2, pred.shape[0])
+        y0 = max(int(centroid_idx_round[1]) - 1, 0)
+        y1 = min(int(centroid_idx_round[1]) + 2, pred.shape[1])
+        z0 = max(int(centroid_idx_round[2]) - 1, 0)
+        z1 = min(int(centroid_idx_round[2]) + 2, pred.shape[2])
+        local_mean_prob = float(pred[x0:x1, y0:y1, z0:z1].mean())
+        centroid_xyz = component_centroid_to_xyz(comp, boundaries)
+        score = mean_prob * numpy.log1p(float(comp.shape[0])) + 0.25 * max_prob
+        candidates.append(
+            {
+                "threshold": float(threshold),
+                "size": int(comp.shape[0]),
+                "mean_prob": mean_prob,
+                "max_prob": max_prob,
+                "top5_mean_prob": top5_mean_prob,
+                "centroid_prob": centroid_prob,
+                "local_mean_prob": local_mean_prob,
+                "bbox_extent_x": float(extents[0]),
+                "bbox_extent_y": float(extents[1]),
+                "bbox_extent_z": float(extents[2]),
+                "bbox_volume": bbox_volume,
+                "fill_ratio": fill_ratio,
+                "score": float(score),
+                "centroid_xyz": centroid_xyz,
+            }
+        )
+
+    candidates.sort(key=lambda item: (item["score"], item["mean_prob"], item["size"]), reverse=True)
+    return candidates
+
+
+def merge_candidate_lists(candidates, merge_distance=0.35):
+    merged = []
+    for candidate in sorted(candidates, key=lambda item: (item["score"], item["mean_prob"], item["size"]), reverse=True):
+        keep = True
+        for existing in merged:
+            distance = float(numpy.linalg.norm(candidate["centroid_xyz"] - existing["centroid_xyz"]))
+            if distance <= merge_distance:
+                keep = False
+                break
+        if keep:
+            merged.append(candidate)
+    return merged
+
+
+def extract_ranked_candidates_multithreshold(sample_path, predicted_tensor, thresholds, min_size=3, merge_distance=0.35):
+    all_candidates = []
+    for threshold in thresholds:
+        all_candidates.extend(
+            extract_ranked_candidates(
+                sample_path,
+                predicted_tensor,
+                threshold=float(threshold),
+                min_size=min_size,
+            )
+        )
+    merged = merge_candidate_lists(all_candidates, merge_distance=merge_distance)
+    merged.sort(key=lambda item: (item["score"], item["mean_prob"], item["size"]), reverse=True)
+    return merged
+
+
+def candidate_distances_to_reference(sample_path, candidates):
+    pdb = Path(sample_path.rstrip("/")).name
+    xyz_pocket_target = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_pocket_/xyz_new_pocket.txt")
+    xyz_pocket_target = numpy.asarray(xyz_pocket_target)
+    if xyz_pocket_target.ndim == 1:
+        xyz_pocket_target = xyz_pocket_target.reshape(1, -1)
+    target_centroid = numpy.mean(xyz_pocket_target, axis=0)
+
+    distances = []
+    for candidate in candidates:
+        distance = float(numpy.linalg.norm(candidate["centroid_xyz"] - target_centroid))
+        distances.append(distance)
+    return distances
+
+
 class UNetAttention3D(nn.Module):
     def __init__(self, in_channels=8, dropout_rate=0.1):
         super().__init__()
@@ -424,11 +642,18 @@ class UNetAttention3D(nn.Module):
 
         # u2 is concatenation of original input (in_channels) and upsample branch (8 channels)
         self.out_conv = nn.Conv3d(in_channels + 8, 1, kernel_size=5, stride=1, padding=2)
+        self.centroid_head = nn.Conv3d(in_channels + 8, 1, kernel_size=1, stride=1, padding=0)
+        self.presence_head = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Flatten(),
+            nn.Linear(128, 1),
+        )
 
     def forward(self, x):
         d1 = self.down1_drop(self.down1_act(self.down1_bn(self.down1_conv(x))))
         d2 = self.bottom_drop(self.bottom_act(self.bottom_bn(self.bottom_conv(d1))))
         d2 = self.attn(d2)
+        presence_logits = self.presence_head(d2)
 
         u1 = self.up1_drop(self.up1_act(self.up1_bn(self.up1_t(d2))))
         u1 = torch.cat([d1, u1], dim=1)
@@ -436,7 +661,7 @@ class UNetAttention3D(nn.Module):
         u2 = self.up2_drop(self.up2_act(self.up2_bn(self.up2_t(u1))))
         u2 = torch.cat([x, u2], dim=1)
 
-        return self.out_conv(u2)
+        return self.out_conv(u2), presence_logits, self.centroid_head(u2)
 
 
 def obtain_coordinates(pdb, predicted_tensor):

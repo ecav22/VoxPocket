@@ -46,23 +46,34 @@ def parse_thresholds(threshold_arg):
     return [float(x.strip()) for x in threshold_arg.split(",") if x.strip()]
 
 
-def evaluate_loader(model, loader, loss_fn, device, threshold=0.5):
+def evaluate_loader(model, loader, loss_fn, device, threshold=0.5, presence_loss_weight=0.0, centroid_loss_weight=0.0):
     model.eval()
     total_loss = 0.0
     total_metric = 0.0
+    total_presence_loss = 0.0
+    total_centroid_loss = 0.0
     total_counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     detected_count = 0
     distances = []
+    presence_criterion = torch.nn.BCEWithLogitsLoss()
+    centroid_criterion = torch.nn.MSELoss()
 
     with torch.no_grad():
-        for idx, (features, target) in enumerate(loader):
+        for idx, (features, target, pocket_present, centroid_target) in enumerate(loader):
             features = features.to(device)
             target = target.to(device)
-            logits = model(features)
+            pocket_present = pocket_present.to(device)
+            centroid_target = centroid_target.to(device)
+            logits, presence_logits, centroid_logits = model(features)
             pred = torch.sigmoid(logits)
 
-            total_loss += loss_fn(target, logits).item()
+            seg_loss = loss_fn(target, logits)
+            presence_loss = presence_criterion(presence_logits, pocket_present)
+            centroid_loss = centroid_criterion(torch.sigmoid(centroid_logits), centroid_target)
+            total_loss += (seg_loss + presence_loss_weight * presence_loss + centroid_loss_weight * centroid_loss).item()
             total_metric += utilities.custom_metrics(target, pred).item()
+            total_presence_loss += presence_loss.item()
+            total_centroid_loss += centroid_loss.item()
             counts = utilities.segmentation_counts(target, pred, threshold=threshold)
             total_counts["tp"] += counts["tp"]
             total_counts["fp"] += counts["fp"]
@@ -85,6 +96,8 @@ def evaluate_loader(model, loader, loss_fn, device, threshold=0.5):
     return {
         "mean_loss": mean_loss,
         "mean_metric": mean_metric,
+        "mean_presence_loss": total_presence_loss / n,
+        "mean_centroid_loss": total_centroid_loss / n,
         "dice": segm["dice"],
         "iou": segm["iou"],
         "precision": segm["precision"],
@@ -96,10 +109,18 @@ def evaluate_loader(model, loader, loss_fn, device, threshold=0.5):
     }
 
 
-def choose_best_validation_metrics(model, loader, loss_fn, device, thresholds):
+def choose_best_validation_metrics(model, loader, loss_fn, device, thresholds, presence_loss_weight, centroid_loss_weight):
     best = None
     for threshold in thresholds:
-        metrics = evaluate_loader(model, loader, loss_fn, device, threshold=threshold)
+        metrics = evaluate_loader(
+            model,
+            loader,
+            loss_fn,
+            device,
+            threshold=threshold,
+            presence_loss_weight=presence_loss_weight,
+            centroid_loss_weight=centroid_loss_weight,
+        )
         metrics["threshold"] = threshold
         score = (
             metrics["dice"],
@@ -145,6 +166,8 @@ def main():
     parser.add_argument("--max-steps", type=int, default=12, help="Max steps per epoch when toy=true")
     parser.add_argument("--augment", type=str, default="true", help="Apply simple 3D augmentation during training")
     parser.add_argument("--early-stop-patience", type=int, default=5, help="Stop after N epochs without validation improvement")
+    parser.add_argument("--presence-loss-weight", type=float, default=0.2, help="Weight for auxiliary pocket-presence loss")
+    parser.add_argument("--centroid-loss-weight", type=float, default=0.1, help="Weight for auxiliary centroid-heatmap loss")
     parser.add_argument(
         "--val-thresholds",
         type=str,
@@ -181,6 +204,8 @@ def main():
     num_epochs = args.toy_epochs if toy_mode else args.epochs
     learning_rate = args.learning_rate
     dropout_rate = args.dropout_rate
+    presence_loss_weight = args.presence_loss_weight
+    centroid_loss_weight = args.centroid_loss_weight
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -202,6 +227,8 @@ def main():
     print("Loss:", args.loss, "pos_weight:", args.pos_weight, "dice_weight:", args.dice_weight)
     print("Augment:", augment)
     print("Validation thresholds:", val_thresholds)
+    print("Presence loss weight:", presence_loss_weight)
+    print("Centroid loss weight:", centroid_loss_weight)
 
     dataset = utilities.PocketDataset(files, feature_names=feature_names, augment=augment and not toy_mode)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -229,12 +256,16 @@ def main():
     model = utilities.UNetAttention3D(in_channels=len(feature_names), dropout_rate=dropout_rate).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_fn = make_loss_fn(args.loss, args.pos_weight, args.dice_weight, device)
+    presence_criterion = torch.nn.BCEWithLogitsLoss()
+    centroid_criterion = torch.nn.MSELoss()
 
     history = {
         "loss": [],
         "custom_metrics": [],
         "val_loss": [],
         "val_custom_metrics": [],
+        "val_presence_loss": [],
+        "val_centroid_loss": [],
         "val_dice": [],
         "val_detection_rate": [],
         "val_mean_distance": [],
@@ -251,16 +282,21 @@ def main():
         epoch_loss = 0.0
         epoch_metric = 0.0
 
-        for step, (features, target) in enumerate(loader):
+        for step, (features, target, pocket_present, centroid_target) in enumerate(loader):
             if step >= steps_per_epoch:
                 break
 
             features = features.to(device)
             target = target.to(device)
+            pocket_present = pocket_present.to(device)
+            centroid_target = centroid_target.to(device)
 
             optimizer.zero_grad()
-            logits = model(features)
-            loss = loss_fn(target, logits)
+            logits, presence_logits, centroid_logits = model(features)
+            seg_loss = loss_fn(target, logits)
+            presence_loss = presence_criterion(presence_logits, pocket_present)
+            centroid_loss = centroid_criterion(torch.sigmoid(centroid_logits), centroid_target)
+            loss = seg_loss + presence_loss_weight * presence_loss + centroid_loss_weight * centroid_loss
             loss.backward()
             optimizer.step()
 
@@ -277,15 +313,27 @@ def main():
 
         msg = f"Epoch {epoch + 1}/{num_epochs} - steps: {steps_per_epoch} - loss: {epoch_loss:.6f} - custom_metrics: {epoch_metric:.6f}"
         if val_loader is not None:
-            val_metrics = choose_best_validation_metrics(model, val_loader, loss_fn, device, val_thresholds)
+            val_metrics = choose_best_validation_metrics(
+                model,
+                val_loader,
+                loss_fn,
+                device,
+                val_thresholds,
+                presence_loss_weight,
+                centroid_loss_weight,
+            )
             val_loss = val_metrics["mean_loss"]
             val_metric = val_metrics["mean_metric"]
+            val_presence_loss = val_metrics["mean_presence_loss"]
+            val_centroid_loss = val_metrics["mean_centroid_loss"]
             val_dice = val_metrics["dice"]
             val_detection_rate = val_metrics["detection_rate"]
             val_mean_distance = val_metrics["mean_distance"]
             val_threshold = val_metrics["threshold"]
             history["val_loss"].append(val_loss)
             history["val_custom_metrics"].append(val_metric)
+            history["val_presence_loss"].append(val_presence_loss)
+            history["val_centroid_loss"].append(val_centroid_loss)
             history["val_dice"].append(val_dice)
             history["val_detection_rate"].append(val_detection_rate)
             history["val_mean_distance"].append("" if val_mean_distance is None else val_mean_distance)
@@ -294,6 +342,8 @@ def main():
                 f" - val_threshold: {val_threshold:.2f}"
                 f" - val_loss: {val_loss:.6f}"
                 f" - val_custom_metrics: {val_metric:.6f}"
+                f" - val_presence_loss: {val_presence_loss:.6f}"
+                f" - val_centroid_loss: {val_centroid_loss:.6f}"
                 f" - val_dice: {val_dice:.6f}"
                 f" - val_detect: {val_detection_rate:.6f}"
             )
@@ -330,6 +380,8 @@ def main():
                     "loss_name": args.loss,
                     "pos_weight": args.pos_weight,
                     "dice_weight": args.dice_weight,
+                    "presence_loss_weight": presence_loss_weight,
+                    "centroid_loss_weight": centroid_loss_weight,
                 }
                 torch.save(best_checkpoint, best_checkpoint_path)
             else:
@@ -351,6 +403,8 @@ def main():
         "loss_name": args.loss,
         "pos_weight": args.pos_weight,
         "dice_weight": args.dice_weight,
+        "presence_loss_weight": presence_loss_weight,
+        "centroid_loss_weight": centroid_loss_weight,
         "val_thresholds": val_thresholds,
     }
     checkpoint_path = PROJECT_ROOT / "artifacts/torch/model_unet_bn_attention.pt"
@@ -386,7 +440,8 @@ def main():
             "history_path": str(history_path),
             "notes": (
                 f"train_complete;loss={args.loss};pos_weight={args.pos_weight};dice_weight={args.dice_weight};"
-                f"augment={augment};final_val_dice={final_val_dice};best_val_dice={best_val_dice};"
+                f"augment={augment};presence_loss_weight={presence_loss_weight};centroid_loss_weight={centroid_loss_weight};"
+                f"final_val_dice={final_val_dice};best_val_dice={best_val_dice};"
                 f"best_val_detection_rate={best_val_detection_rate};best_val_mean_distance={best_val_mean_distance}"
             ),
         },
