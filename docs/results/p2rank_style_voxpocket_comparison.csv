@@ -1,0 +1,12 @@
+method,coach420_top_n,coach420_top_n_plus_2,holo4k_top_n,holo4k_top_n_plus_2,source,notes
+Fpocket,56.4,68.9,52.4,63.1,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+Fpocket+PRANK,63.6,76.5,62.0,71.0,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+SiteHound,53.0,69.3,50.1,62.1,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+MetaPocket 2.0,63.4,74.6,57.9,68.6,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+DeepSite,56.4,63.4,45.6,48.2,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+P2Rank protrusion,64.2,73.0,59.3,67.7,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+P2Rank,72.0,78.3,68.6,74.0,P2Rank paper,"Paper Table 3; DCC success cutoff 4 Å."
+P2Rank rerun on COACH420-lite,68.7,76.4,,,Our same-set rerun,"COACH420-lite recoverable subset, n=406; 4 Å = 0.4 nm cutoff; Top-n approximated as Top-1 and Top-(n+2) as Top-3."
+VoxPocket-lite heuristic ranker,60.5,70.9,,,Our same-set rerun,"COACH420-lite candidate ranking, n=405 samples with at least one candidate; 4 Å = 0.4 nm cutoff; Top-n approximated as Top-1 and Top-(n+2) as Top-3."
+VoxPocket-lite RF ranker depth 6,60.7,70.1,,,Our same-set rerun,"COACH420-lite candidate ranking, n=405 samples with at least one candidate; 4 Å = 0.4 nm cutoff; trained with 0.4 nm labels; Top-n approximated as Top-1 and Top-(n+2) as Top-3."
+VoxPocket-lite RF ranker depth 12,60.5,70.9,,,Our same-set rerun,"COACH420-lite candidate ranking, n=405 samples with at least one candidate; 4 Å = 0.4 nm cutoff; trained with 0.4 nm labels; Top-n approximated as Top-1 and Top-(n+2) as Top-3."

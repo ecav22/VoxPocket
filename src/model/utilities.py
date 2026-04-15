@@ -220,56 +220,28 @@ def open_files(path, feature_names=None):
     non_zeros = numpy.nonzero(N)
     zeros = numpy.nonzero(N == 0)
 
-    N = N.astype(numpy.float32)
-    N[non_zeros] = 1.0
-    N[zeros] = nzv
-    N = numpy.expand_dims(N, axis=3)
-
-    bfactors = load_numeric_npy(sample_dir / "for_labview_protein_/bfactors_tensor.npy").astype(numpy.float32)
-    bfactors = mean_max_scaler(non_zeros, bfactors)
-    bfactors[zeros] = nzv
-    bfactors = numpy.expand_dims(bfactors, axis=3)
-
-    buriedness = load_numeric_npy(sample_dir / "for_labview_protein_/buriedness_tensor.npy").astype(numpy.float32)
-    buriedness = mean_max_scaler(non_zeros, buriedness)
-    buriedness[zeros] = nzv
-    buriedness = numpy.expand_dims(buriedness, axis=3)
-
-    charge = load_numeric_npy(sample_dir / "for_labview_protein_/charge_tensor.npy").astype(numpy.float32)
-    charge = mean_max_scaler(non_zeros, charge)
-    charge[zeros] = nzv
-    charge = numpy.expand_dims(charge, axis=3)
-
-    radius = load_numeric_npy(sample_dir / "for_labview_protein_/radius_tensor.npy").astype(numpy.float32)
-    radius = mean_max_scaler(non_zeros, radius)
-    radius[zeros] = nzv
-    radius = numpy.expand_dims(radius, axis=3)
-
-    hbdon = load_numeric_npy(sample_dir / "for_labview_protein_/hbdon_tensor.npy").astype(numpy.float32)
-    hbdon = mean_max_scaler(non_zeros, hbdon)
-    hbdon[zeros] = nzv
-    hbdon = numpy.expand_dims(hbdon, axis=3)
-
-    hbacc = load_numeric_npy(sample_dir / "for_labview_protein_/hbac_tensor.npy").astype(numpy.float32)
-    hbacc = mean_max_scaler(non_zeros, hbacc)
-    hbacc[zeros] = nzv
-    hbacc = numpy.expand_dims(hbacc, axis=3)
-
-    sasa = load_numeric_npy(sample_dir / "for_labview_protein_/sasa_tensor.npy").astype(numpy.float32)
-    sasa = mean_max_scaler(non_zeros, sasa)
-    sasa[zeros] = nzv
-    sasa = numpy.expand_dims(sasa, axis=3)
-
-    feature_map = {
-        "N": N,
-        "bfactors": bfactors,
-        "buriedness": buriedness,
-        "charge": charge,
-        "radius": radius,
-        "hbdon": hbdon,
-        "hbacc": hbacc,
-        "sasa": sasa,
+    feature_paths = {
+        "N": "N_tensor.npy",
+        "bfactors": "bfactors_tensor.npy",
+        "buriedness": "buriedness_tensor.npy",
+        "charge": "charge_tensor.npy",
+        "radius": "radius_tensor.npy",
+        "hbdon": "hbdon_tensor.npy",
+        "hbacc": "hbac_tensor.npy",
+        "sasa": "sasa_tensor.npy",
     }
+
+    feature_map = {}
+    for name in feature_names:
+        tensor = load_numeric_npy(sample_dir / "for_labview_protein_" / feature_paths[name]).astype(numpy.float32)
+        if name == "N":
+            tensor = tensor.copy()
+            tensor[non_zeros] = 1.0
+        else:
+            tensor = mean_max_scaler(non_zeros, tensor)
+        tensor[zeros] = nzv
+        feature_map[name] = numpy.expand_dims(tensor, axis=3)
+
     features = numpy.concatenate([feature_map[name] for name in feature_names], axis=3)
 
     target = load_numeric_npy(sample_dir / "for_labview_pocket_/N_tensor_new_pocket.npy").astype(numpy.float32)
@@ -285,15 +257,18 @@ def open_files(path, feature_names=None):
 
 class PocketDataset(Dataset):
     def __init__(self, filepaths, feature_names=None, augment=False):
-        required = [
-            "for_labview_protein_/N_tensor.npy",
-            "for_labview_protein_/bfactors_tensor.npy",
-            "for_labview_protein_/buriedness_tensor.npy",
-            "for_labview_protein_/charge_tensor.npy",
-            "for_labview_protein_/radius_tensor.npy",
-            "for_labview_protein_/hbdon_tensor.npy",
-            "for_labview_protein_/hbac_tensor.npy",
-            "for_labview_protein_/sasa_tensor.npy",
+        self.feature_names = FEATURE_ORDER if feature_names is None else feature_names
+        feature_paths = {
+            "N": "for_labview_protein_/N_tensor.npy",
+            "bfactors": "for_labview_protein_/bfactors_tensor.npy",
+            "buriedness": "for_labview_protein_/buriedness_tensor.npy",
+            "charge": "for_labview_protein_/charge_tensor.npy",
+            "radius": "for_labview_protein_/radius_tensor.npy",
+            "hbdon": "for_labview_protein_/hbdon_tensor.npy",
+            "hbacc": "for_labview_protein_/hbac_tensor.npy",
+            "sasa": "for_labview_protein_/sasa_tensor.npy",
+        }
+        required = [feature_paths[name] for name in self.feature_names] + [
             "for_labview_pocket_/N_tensor_new_pocket.npy",
         ]
 
@@ -321,7 +296,6 @@ class PocketDataset(Dataset):
         )
 
         self.filepaths = valid_paths
-        self.feature_names = FEATURE_ORDER if feature_names is None else feature_names
         self.raw_count = len(raw_paths)
         self.usable_count = len(valid_paths)
         self.skipped_count = skipped
@@ -440,7 +414,7 @@ def pocket_detected_and_distance(sample_path, predicted_tensor, threshold=0.5):
     Returns (detected: bool, distance: float|None).
     """
     pdb = Path(sample_path.rstrip("/")).name
-    xyz_protein, predicted_values, xyz_pocket_target = obtain_coordinates(pdb, predicted_tensor)
+    xyz_protein, predicted_values, xyz_pocket_target = obtain_coordinates(sample_path, predicted_tensor)
     predicted_values = numpy.asarray(predicted_values)
 
     detected_mask = predicted_values >= threshold
@@ -505,14 +479,14 @@ def connected_components_3d(binary_mask):
 
 
 def extract_ranked_candidates(sample_path, predicted_tensor, threshold=0.5, min_size=3):
-    pdb = Path(sample_path.rstrip("/")).name
     pred = numpy.asarray(predicted_tensor)
     if pred.ndim == 5:
         pred = pred[0, 0]
     elif pred.ndim == 4:
         pred = pred[0]
 
-    boundaries = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_protein_/axis_bins.txt")
+    sample_dir = PROJECT_ROOT / sample_path
+    boundaries = numpy.loadtxt(sample_dir / "for_labview_protein_/axis_bins.txt")
     binary_mask = pred >= threshold
     components = connected_components_3d(binary_mask)
 
@@ -563,6 +537,7 @@ def extract_ranked_candidates(sample_path, predicted_tensor, threshold=0.5, min_
                 "fill_ratio": fill_ratio,
                 "score": float(score),
                 "centroid_xyz": centroid_xyz,
+                "indices": comp,
             }
         )
 
@@ -601,8 +576,8 @@ def extract_ranked_candidates_multithreshold(sample_path, predicted_tensor, thre
 
 
 def candidate_distances_to_reference(sample_path, candidates):
-    pdb = Path(sample_path.rstrip("/")).name
-    xyz_pocket_target = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_pocket_/xyz_new_pocket.txt")
+    sample_dir = PROJECT_ROOT / sample_path
+    xyz_pocket_target = numpy.loadtxt(sample_dir / "for_labview_pocket_/xyz_new_pocket.txt")
     xyz_pocket_target = numpy.asarray(xyz_pocket_target)
     if xyz_pocket_target.ndim == 1:
         xyz_pocket_target = xyz_pocket_target.reshape(1, -1)
@@ -664,20 +639,21 @@ class UNetAttention3D(nn.Module):
         return self.out_conv(u2), presence_logits, self.centroid_head(u2)
 
 
-def obtain_coordinates(pdb, predicted_tensor):
+def obtain_coordinates(sample_path, predicted_tensor):
     pred = predicted_tensor
     if pred.ndim == 5:
         pred = pred[0, 0]
     elif pred.ndim == 4:
         pred = pred[0]
 
-    boundaries = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_protein_/axis_bins.txt")
+    sample_dir = PROJECT_ROOT / sample_path
+    boundaries = numpy.loadtxt(sample_dir / "for_labview_protein_/axis_bins.txt")
     x_bins = boundaries[0]
     y_bins = boundaries[1]
     z_bins = boundaries[2]
 
-    xyz_protein = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_protein_/xyz.txt")
-    xyz_pocket_target = numpy.loadtxt(PROJECT_ROOT / "refined-set" / pdb / "for_labview_pocket_/xyz_new_pocket.txt")
+    xyz_protein = numpy.loadtxt(sample_dir / "for_labview_protein_/xyz.txt")
+    xyz_pocket_target = numpy.loadtxt(sample_dir / "for_labview_pocket_/xyz_new_pocket.txt")
 
     predicted_values = []
     for coord in xyz_protein:

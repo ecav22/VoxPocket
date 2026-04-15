@@ -162,6 +162,12 @@ def main():
         help="Path to validation filepaths list; ignored if missing/empty",
     )
     parser.add_argument("--save-best", type=str, default="true", help="Save best-by-val-dice checkpoint true/false")
+    parser.add_argument(
+        "--init-checkpoint",
+        type=str,
+        default="",
+        help="Optional checkpoint to initialize model weights before training/fine-tuning",
+    )
     parser.add_argument("--max-samples", type=int, default=24, help="Max samples when toy=true")
     parser.add_argument("--max-steps", type=int, default=12, help="Max steps per epoch when toy=true")
     parser.add_argument("--augment", type=str, default="true", help="Apply simple 3D augmentation during training")
@@ -254,6 +260,14 @@ def main():
         steps_per_epoch = len(loader)
 
     model = utilities.UNetAttention3D(in_channels=len(feature_names), dropout_rate=dropout_rate).to(device)
+    if args.init_checkpoint:
+        init_checkpoint_path = Path(args.init_checkpoint)
+        if not init_checkpoint_path.is_absolute():
+            init_checkpoint_path = PROJECT_ROOT / init_checkpoint_path
+        init_checkpoint = torch.load(init_checkpoint_path, map_location=device)
+        state_dict = init_checkpoint.get("model_state_dict", init_checkpoint)
+        model.load_state_dict(state_dict)
+        print(f"Initialized model from checkpoint: {init_checkpoint_path}")
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_fn = make_loss_fn(args.loss, args.pos_weight, args.dice_weight, device)
     presence_criterion = torch.nn.BCEWithLogitsLoss()

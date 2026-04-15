@@ -1,0 +1,4 @@
+dataset,samples,candidates,mean_candidates_per_sample,oracle_success_0_4nm,oracle_success_rate_0_4nm
+CHEN11-lite,251,2082,8.294821,215/251,0.856574
+JOINED-lite,533,4333,8.129456,392/533,0.735460
+COACH420-lite,406,3257,8.022167,305/406,0.751232
